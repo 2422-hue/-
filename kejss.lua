@@ -92,18 +92,6 @@ local function isCacheValid(cache)
     return true
 end
 
-local function getCache()
-    local shared = sharedRead()
-    if isCacheValid(shared) then return shared, "shared" end
-    return nil, nil
-end
-
-local function saveCache(cache)
-    cache.updatedAt = os.time()
-    cache.placeId = PlaceId
-    sharedWrite(cache)
-end
-
 local function fetchServers()
     local result = {}
     local cursor = ""
@@ -174,21 +162,8 @@ local function createNewCache()
         total = #queue,
         creator = player.Name
     }
-    saveCache(cache)
+    sharedWrite(cache)
     return cache
-end
-
-local function popNextJobId()
-    local cache, source = getCache()
-    if not cache then
-        cache = createNewCache()
-        if not cache then return nil, 0, "create_failed" end
-        source = "new"
-    end
-
-    local nextId = table.remove(cache.queue, 1)
-    saveCache(cache)
-    return nextId, #cache.queue, source
 end
 
 local screenGui = Instance.new("ScreenGui")
@@ -239,18 +214,37 @@ timerLabel.Parent = mainFrame
 
 local READY_JOB_ID = nil
 local READY_REMAINING = 0
-local READY_SOURCE = nil
 
 local function prepareHopInBackground()
     local when = math.random(1, 20)
     task.wait(when)
 
-    local jobId, remaining, source = popNextJobId()
-    if jobId then
-        READY_JOB_ID = jobId
-        READY_REMAINING = remaining
-        READY_SOURCE = source
+    local cache = sharedRead()
+
+    if cache and type(cache.queue) == "table" then
+        for i = #cache.queue, 1, -1 do
+            if cache.queue[i] == CurrentJobId then
+                table.remove(cache.queue, i)
+            end
+        end
     end
+
+    if not cache or #cache.queue == 0 then
+        cache = createNewCache()
+        if not cache or #cache.queue == 0 then
+            return
+        end
+    end
+
+    local nextId = table.remove(cache.queue, 1)
+    if not nextId then return end
+
+    cache.updatedAt = os.time()
+    cache.placeId = PlaceId
+    sharedWrite(cache)
+
+    READY_JOB_ID = nextId
+    READY_REMAINING = #cache.queue
 end
 
 local function smartHop()
@@ -268,8 +262,7 @@ local function smartHop()
         return
     end
 
-    local srcText = READY_SOURCE == "shared" and "общий" or "новый"
-    statusLabel.Text = "SERVER HOP (" .. srcText .. ")"
+    statusLabel.Text = "SERVER HOP"
     timerLabel.Text = string.format("→ %s... | осталось %d",
         string.sub(READY_JOB_ID, 1, 8), READY_REMAINING)
 
