@@ -22,10 +22,11 @@ local CONFIG = {
     PantryID = "f4e76f34-ce27-4bb9-9608-d0e85590bd84",
     PantryBasket = "my-new-basket-name",
 
-    MinPlayers = 5,
+    MinPlayers = 1,
     MaxPlayers = 25,
     MaxPages = 6,
     CacheMaxAgeMinutes = 120,
+    LockTTL = 180,
     ScriptURL = "https://raw.githubusercontent.com/2422-hue/-/main/kejss.lua",
 }
 
@@ -83,13 +84,18 @@ local function sharedWrite(data)
     return res and res.StatusCode == 200
 end
 
-local function isCacheValid(cache)
-    if not cache or type(cache.queue) ~= "table" then return false end
-    if cache.placeId ~= PlaceId then return false end
-    if #cache.queue == 0 then return false end
-    local age = (os.time() - (cache.updatedAt or 0)) / 60
-    if age > CONFIG.CacheMaxAgeMinutes then return false end
-    return true
+local function pruneLocks(data)
+    if not data then return nil end
+    if type(data.players) ~= "table" then data.players = {} end
+    local now = os.time()
+    local kept = {}
+    for _, entry in ipairs(data.players) do
+        if type(entry) == "table" and (now - (entry.ts or 0)) < CONFIG.LockTTL then
+            table.insert(kept, entry)
+        end
+    end
+    data.players = kept
+    return data
 end
 
 local function fetchServers()
@@ -123,14 +129,10 @@ local function fetchServers()
 
         pages = pages + 1
 
-        if fetchedThisPage < 100 then
-            break
-        end
+        if fetchedThisPage < 100 then break end
 
         cursor = data.nextPageCursor
-        if not cursor or cursor == "" or cursor == "null" then
-            break
-        end
+        if not cursor or cursor == "" or cursor == "null" then break end
 
         task.wait(0.3)
     end
@@ -146,24 +148,14 @@ local function fetchServers()
     return result
 end
 
-local function createNewCache()
+local function createNewQueue()
     local servers = fetchServers()
     if #servers == 0 then return nil end
-
     local queue = {}
     for _, s in ipairs(servers) do
         table.insert(queue, s.id)
     end
-
-    local cache = {
-        placeId = PlaceId,
-        queue = queue,
-        updatedAt = os.time(),
-        total = #queue,
-        creator = player.Name
-    }
-    sharedWrite(cache)
-    return cache
+    return queue
 end
 
 local screenGui = Instance.new("ScreenGui")
@@ -214,37 +206,124 @@ timerLabel.Parent = mainFrame
 
 local READY_JOB_ID = nil
 local READY_REMAINING = 0
+local ABORT_CRASH = false
+
+local function pickRandomFree(cache)
+    if type(cache.queue) ~= "table" then cache.queue = {} end
+    if type(cache.players) ~= "table" then cache.players = {} end
+
+    for i = #cache.queue, 1, -1 do
+        if cache.queue[i] == CurrentJobId then
+            table.remove(cache.queue, i)
+        end
+    end
+
+    local locked = {}
+    for _, entry in ipairs(cache.players) do
+        if entry.jobId then locked[entry.jobId] = true end
+    end
+
+    local free = {}
+    for _, id in ipairs(cache.queue) do
+        if not locked[id] then table.insert(free, id) end
+    end
+
+    if #free == 0 then
+        local newQueue = createNewQueue()
+        if newQueue then
+            cache.queue = newQueue
+            for _, id in ipairs(newQueue) do
+                if not locked[id] and id ~= CurrentJobId then
+                    table.insert(free, id)
+                end
+            end
+        end
+    end
+
+    if #free == 0 then return nil, locked end
+
+    local pick = math.random(1, #free)
+    return free[pick], locked
+end
 
 local function prepareHopInBackground()
     local when = math.random(1, 20)
     task.wait(when)
 
-    local cache = sharedRead()
+    local cache = pruneLocks(sharedRead())
+    if not cache then cache = {} end
 
-    if cache and type(cache.queue) == "table" then
-        for i = #cache.queue, 1, -1 do
-            if cache.queue[i] == CurrentJobId then
-                table.remove(cache.queue, i)
-            end
-        end
-    end
-
-    if not cache or #cache.queue == 0 then
-        cache = createNewCache()
-        if not cache or #cache.queue == 0 then
-            return
-        end
-    end
-
-    local nextId = table.remove(cache.queue, 1)
+    local nextId, _ = pickRandomFree(cache)
     if not nextId then return end
 
-    cache.updatedAt = os.time()
+    for i = #cache.queue, 1, -1 do
+        if cache.queue[i] == nextId then
+            table.remove(cache.queue, i)
+            break
+        end
+    end
+
+    table.insert(cache.players, {
+        userId = player.UserId,
+        name = player.Name,
+        jobId = nextId,
+        ts = os.time()
+    })
+
     cache.placeId = PlaceId
+    cache.updatedAt = os.time()
     sharedWrite(cache)
 
     READY_JOB_ID = nextId
     READY_REMAINING = #cache.queue
+end
+
+local function releaseReadyJob()
+    if not READY_JOB_ID then return end
+    local c = pruneLocks(sharedRead())
+    if c and type(c.queue) == "table" then
+        table.insert(c.queue, READY_JOB_ID)
+        if type(c.players) == "table" then
+            for i = #c.players, 1, -1 do
+                if c.players[i].jobId == READY_JOB_ID and c.players[i].userId == player.UserId then
+                    table.remove(c.players, i)
+                end
+            end
+        end
+        c.placeId = PlaceId
+        c.updatedAt = os.time()
+        sharedWrite(c)
+    end
+    READY_JOB_ID = nil
+    READY_REMAINING = 0
+end
+
+local function scripterCheckInBackground()
+    local cache = pruneLocks(sharedRead())
+    if not cache or type(cache.players) ~= "table" then return end
+
+    local ids = {}
+    for _, entry in ipairs(cache.players) do
+        if entry.userId and entry.userId ~= player.UserId then
+            ids[entry.userId] = true
+        end
+    end
+
+    local found = false
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= player and ids[p.UserId] then
+            found = true
+            break
+        end
+    end
+
+    if found then
+        ABORT_CRASH = true
+        if READY_JOB_ID then
+            releaseReadyJob()
+            task.spawn(prepareHopInBackground)
+        end
+    end
 end
 
 local function smartHop()
@@ -252,7 +331,7 @@ local function smartHop()
     timerLabel.Text = "Проверяю готовый ID"
 
     local waitStart = os.clock()
-    while not READY_JOB_ID and (os.clock() - waitStart) < 25 do
+    while not READY_JOB_ID and (os.clock() - waitStart) < 30 do
         task.wait(0.1)
     end
 
@@ -339,9 +418,10 @@ end
 
 task.spawn(function()
     statusLabel.Text = "ЗАПУСК"
-    timerLabel.Text = "Фоновый процесс пошёл"
+    timerLabel.Text = "Фоновые процессы пошли"
 
     task.spawn(prepareHopInBackground)
+    task.spawn(scripterCheckInBackground)
 
     task.wait(1.5)
 
@@ -355,12 +435,26 @@ task.spawn(function()
 
     stopMoving(bv)
 
+    if ABORT_CRASH then
+        statusLabel.Text = "ОБНАРУЖЕН СКРИПТЕР"
+        timerLabel.Text = "Хопаю без краша"
+        smartHop()
+        return
+    end
+
     statusLabel.Text = "СТРЕЛЯЕМ"
     timerLabel.TextColor3 = Color3.fromRGB(255, 0, 0)
     startCrashSpam()
 
     local t = 30
     while t > 0 do
+        if ABORT_CRASH then
+            stopCrashSpam()
+            statusLabel.Text = "ОБНАРУЖЕН СКРИПТЕР"
+            timerLabel.Text = "Прерываю краш, хопаю"
+            smartHop()
+            return
+        end
         local idState = READY_JOB_ID and "ID готов" or "ждём ID"
         timerLabel.Text = string.format("ХОП ЧЕРЕЗ %d СЕК | %s", t, idState)
         task.wait(1)
