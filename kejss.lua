@@ -26,7 +26,7 @@ local CONFIG = {
     MaxPlayers = 25,
     MaxPages = 6,
     CacheMaxAgeMinutes = 120,
-    ScriptURL = "https://pastebin.com/raw/KzHtTAPc",
+    ScriptURL = "https://raw.githubusercontent.com/2422-hue/-/main/kejss.lua",
 }
 
 local queue_on_teleport = (syn and syn.queue_on_teleport)
