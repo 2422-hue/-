@@ -39,6 +39,14 @@ local TargetNames = {
     "Invader : Intercept", "Invader : Destruct", "Invader : Obliterate",
     "Invader : Troop", "Invader : Gravitron ( V.1 )",
     "Invader : Commander ( V.1 )", "WRAITH", "Backdoor Obliterate_001",
+    "Soundwave Octopus Bathub", "Giant Armed Camo Bathub",
+    "Alt Giant Screen [ Enemy ]", "Soundwave T Bathub",
+    "Soundwave Sky Bathub", "Soundwave T Bathub V2",
+    "Soundwave Boss Bathub V2", "Soundwave Triple Bathub 1.0",
+    "Soundwave Triple Bathub 2.0", "Soundwave Faker",
+    "Soundwave Astral Sky Bathub 2.0", "Soundwave Astral Sky Bathub 1.0",
+    "Soundwave T Bathub V3", "Soundwave Boss Bathub V3",
+    "Hydra Dj urinal Bathub", "Vanguard Mutant Bathub",
 }
 
 local TargetSet = {}
