@@ -54,6 +54,13 @@ local function isExcluded(name)
     return ExcludedNames[name] == true
 end
 
+local function expandSimulationRadius()
+    pcall(function()
+        sethiddenproperty(LocalPlayer, "SimulationRadius", 112412400000)
+        sethiddenproperty(LocalPlayer, "MaxSimulationRadius", 112412400000)
+    end)
+end
+
 local ORBIT_CENTER     = Vector3.new(-7197.573, 130.240, 65.705)
 local ORBIT_RADIUS     = 929.17
 local ORBIT_HEIGHT     = 310
@@ -248,6 +255,8 @@ local function getClosestBathub()
 end
 
 local function teleportAll(targetPos)
+    expandSimulationRadius()
+
     local aiFolder = workspace:FindFirstChild("AI")
     if not aiFolder then return end
 
@@ -288,12 +297,7 @@ local function removeHumanoids()
 end
 
 local function killAllHumanoids(onlyListed)
-    if not onlyListed then
-        pcall(function()
-            sethiddenproperty(LocalPlayer, "SimulationRadius", 112412400000)
-            sethiddenproperty(LocalPlayer, "MaxSimulationRadius", 112412400000)
-        end)
-    end
+    expandSimulationRadius()
 
     for _, d in pairs(workspace:GetDescendants()) do
         if d.ClassName == "Humanoid"
@@ -314,6 +318,8 @@ local function killAllHumanoids(onlyListed)
 end
 
 local function freezeAllNPCs()
+    expandSimulationRadius()
+
     for _, d in pairs(workspace:GetDescendants()) do
         if d.ClassName == "Humanoid"
             and d.Parent.Name ~= LocalPlayer.Name
@@ -426,10 +432,7 @@ end
 
 local function startMode4()
     connection = RunService.Heartbeat:Connect(function()
-        pcall(function()
-            sethiddenproperty(LocalPlayer, "SimulationRadius", 112412400000)
-            sethiddenproperty(LocalPlayer, "MaxSimulationRadius", 112412400000)
-        end)
+        expandSimulationRadius()
 
         for _, d in pairs(workspace:GetDescendants()) do
             if d.ClassName == "Humanoid"
