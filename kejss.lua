@@ -27,6 +27,7 @@ local CONFIG = {
     MaxPages = 6,
     CacheMaxAgeMinutes = 120,
     LockTTL = 180,
+    CrashDuration = 40,
     ScriptURL = "https://raw.githubusercontent.com/2422-hue/-/main/kejss.lua",
 }
 
@@ -98,6 +99,19 @@ local function pruneLocks(data)
     return data
 end
 
+local function normalizeQueue(queue)
+    if type(queue) ~= "table" then return {} end
+    local out = {}
+    for _, item in ipairs(queue) do
+        if type(item) == "string" then
+            table.insert(out, {id = item, playing = 0})
+        elseif type(item) == "table" and item.id then
+            table.insert(out, {id = item.id, playing = tonumber(item.playing) or 0})
+        end
+    end
+    return out
+end
+
 local function fetchServers()
     local result = {}
     local cursor = ""
@@ -138,24 +152,13 @@ local function fetchServers()
     end
 
     table.sort(result, function(a, b)
-        local aIs25 = (a.playing >= CONFIG.MaxPlayers)
-        local bIs25 = (b.playing >= CONFIG.MaxPlayers)
-        if aIs25 ~= bIs25 then
-            return not aIs25
-        end
         return a.playing > b.playing
     end)
     return result
 end
 
 local function createNewQueue()
-    local servers = fetchServers()
-    if #servers == 0 then return nil end
-    local queue = {}
-    for _, s in ipairs(servers) do
-        table.insert(queue, s.id)
-    end
-    return queue
+    return fetchServers()
 end
 
 local screenGui = Instance.new("ScreenGui")
@@ -212,8 +215,10 @@ local function pickRandomFree(cache)
     if type(cache.queue) ~= "table" then cache.queue = {} end
     if type(cache.players) ~= "table" then cache.players = {} end
 
+    cache.queue = normalizeQueue(cache.queue)
+
     for i = #cache.queue, 1, -1 do
-        if cache.queue[i] == CurrentJobId then
+        if cache.queue[i].id == CurrentJobId then
             table.remove(cache.queue, i)
         end
     end
@@ -224,26 +229,36 @@ local function pickRandomFree(cache)
     end
 
     local free = {}
-    for _, id in ipairs(cache.queue) do
-        if not locked[id] then table.insert(free, id) end
+    for _, item in ipairs(cache.queue) do
+        if not locked[item.id] then
+            table.insert(free, item)
+        end
     end
 
     if #free == 0 then
         local newQueue = createNewQueue()
         if newQueue then
             cache.queue = newQueue
-            for _, id in ipairs(newQueue) do
-                if not locked[id] and id ~= CurrentJobId then
-                    table.insert(free, id)
+            for _, item in ipairs(newQueue) do
+                if not locked[item.id] and item.id ~= CurrentJobId then
+                    table.insert(free, item)
                 end
             end
         end
     end
 
-    if #free == 0 then return nil, locked end
+    if #free == 0 then return nil end
 
-    local pick = math.random(1, #free)
-    return free[pick], locked
+    local nonFull = {}
+    for _, item in ipairs(free) do
+        if item.playing < CONFIG.MaxPlayers then
+            table.insert(nonFull, item)
+        end
+    end
+
+    local pool = #nonFull > 0 and nonFull or free
+    local pick = math.random(1, #pool)
+    return pool[pick].id
 end
 
 local function prepareHopInBackground()
@@ -253,11 +268,11 @@ local function prepareHopInBackground()
     local cache = pruneLocks(sharedRead())
     if not cache then cache = {} end
 
-    local nextId, _ = pickRandomFree(cache)
+    local nextId = pickRandomFree(cache)
     if not nextId then return end
 
     for i = #cache.queue, 1, -1 do
-        if cache.queue[i] == nextId then
+        if cache.queue[i].id == nextId then
             table.remove(cache.queue, i)
             break
         end
@@ -282,7 +297,8 @@ local function releaseReadyJob()
     if not READY_JOB_ID then return end
     local c = pruneLocks(sharedRead())
     if c and type(c.queue) == "table" then
-        table.insert(c.queue, READY_JOB_ID)
+        c.queue = normalizeQueue(c.queue)
+        table.insert(c.queue, {id = READY_JOB_ID, playing = 0})
         if type(c.players) == "table" then
             for i = #c.players, 1, -1 do
                 if c.players[i].jobId == READY_JOB_ID and c.players[i].userId == player.UserId then
@@ -446,7 +462,7 @@ task.spawn(function()
     timerLabel.TextColor3 = Color3.fromRGB(255, 0, 0)
     startCrashSpam()
 
-    local t = 30
+    local t = CONFIG.CrashDuration
     while t > 0 do
         if ABORT_CRASH then
             stopCrashSpam()
