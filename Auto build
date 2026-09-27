@@ -1,4 +1,4 @@
--- LocalScript (StarterPlayerScripts)
+here-- LocalScript (StarterPlayerScripts)
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
@@ -15,8 +15,11 @@ local BOX_COLOR = Color3.fromRGB(0, 170, 255)
 local BOX_DEFAULT_SIZE = Vector3.new(12, 12, 12)
 local BOX_DEFAULT_DISTANCE = 18
 
-local BASE_HEIGHT = 220       -- высота окна когда всё свёрнуто
-local EXPANDED_HEIGHT = 320   -- высота окна когда показана инфо/требования
+local BASE_HEIGHT = 220
+local EXPANDED_HEIGHT = 320
+
+local HELP_BTN_COLOR  = Color3.fromRGB(70, 130, 180)   -- обычный синий
+local HELP_BTN_ACTIVE = Color3.fromRGB(120, 190, 240)  -- светлее синий, когда открыто
 -- =======================================================
 
 local selectedParts = {}
@@ -28,6 +31,7 @@ local isDraggingBox = false
 local isDraggingUI = false
 local currentStepIndex = 1
 local showingInfo = false
+local showingHelp = false
 
 local selectionBoxPart = nil
 local frameStartPos = nil
@@ -58,25 +62,33 @@ local function isIgnoredPart(part)
 	return false
 end
 
+local function getShapeKey(part)
+	if part and part:IsA("Part") then
+		local s = part.Shape
+		if s == Enum.PartType.Ball then return "Ball" end
+		if s == Enum.PartType.Block then return "Block" end
+		if s == Enum.PartType.Cylinder then return "Cylinder" end
+		if s == Enum.PartType.Wedge then return "Wedge" end
+		if s == Enum.PartType.CornerWedge then return "CornerWedge" end
+	end
+	return ""
+end
+
+local function makeKey(name, color, material, transparency, shapeKey)
+	return string.format("%s_%.3f_%.3f_%.3f_%s_%.3f_%s",
+		name,
+		color.R, color.G, color.B,
+		tostring(material),
+		transparency,
+		shapeKey or "")
+end
+
 local function getSelectedCount()
 	local count = 0
 	for _ in pairs(selectedParts) do
 		count = count + 1
 	end
 	return count
-end
-
-local function clearSelection()
-	for part in pairs(selectedParts) do
-		if part and part:IsA("BasePart") then
-			local hl = part:FindFirstChild("BlueprintHighlight")
-			if hl then
-				hl:Destroy()
-			end
-		end
-	end
-	selectedParts = {}
-	statusLabel.Text = "Выделение очищено"
 end
 
 local function addToSelection(part)
@@ -105,15 +117,12 @@ local function buildSteps(partsList)
 	local lookup = {}
 
 	for _, data in ipairs(partsList) do
-		local key = string.format("%s_%.3f_%.3f_%.3f_%s_%.3f",
-			data.Name,
-			data.Color.R, data.Color.G, data.Color.B,
-			tostring(data.Material),
-			data.Transparency)
+		local key = makeKey(data.Name, data.Color, data.Material, data.Transparency, data.ShapeKey)
 
 		if not lookup[key] then
 			lookup[key] = {
 				Name = data.Name,
+				ShapeKey = data.ShapeKey or "",
 				Color = data.Color,
 				Material = data.Material,
 				Transparency = data.Transparency,
@@ -125,6 +134,13 @@ local function buildSteps(partsList)
 	end
 
 	return steps
+end
+
+local function getDisplayName(name, shapeKey)
+	if shapeKey and shapeKey ~= "" then
+		return name .. " | " .. shapeKey
+	end
+	return name
 end
 
 -- ====================== UI ======================
@@ -147,7 +163,7 @@ corner.CornerRadius = UDim.new(0, 12)
 corner.Parent = mainFrame
 
 local title = Instance.new("TextLabel")
-title.Size = UDim2.new(1, -40, 0, 34)
+title.Size = UDim2.new(1, -80, 0, 34)
 title.Position = UDim2.new(0, 0, 0, 0)
 title.BackgroundTransparency = 1
 title.Text = "  Blueprint Builder"
@@ -157,6 +173,7 @@ title.TextSize = 15
 title.TextXAlignment = Enum.TextXAlignment.Left
 title.Parent = mainFrame
 
+-- Кнопка закрытия X
 local closeBtn = Instance.new("TextButton")
 closeBtn.Size = UDim2.new(0, 32, 0, 32)
 closeBtn.Position = UDim2.new(1, -36, 0, 1)
@@ -174,6 +191,21 @@ closeCorner.Parent = closeBtn
 closeBtn.MouseButton1Click:Connect(function()
 	screenGui:Destroy()
 end)
+
+-- Кнопка "!" (помощь / FAQ) — СИНЯЯ
+local helpBtn = Instance.new("TextButton")
+helpBtn.Size = UDim2.new(0, 32, 0, 32)
+helpBtn.Position = UDim2.new(1, -72, 0, 1)
+helpBtn.BackgroundColor3 = HELP_BTN_COLOR
+helpBtn.Text = "!"
+helpBtn.TextColor3 = Color3.new(1, 1, 1)
+helpBtn.Font = Enum.Font.GothamBold
+helpBtn.TextSize = 16
+helpBtn.Parent = mainFrame
+
+local helpCorner = Instance.new("UICorner")
+helpCorner.CornerRadius = UDim.new(0, 8)
+helpCorner.Parent = helpBtn
 
 title.InputBegan:Connect(function(input)
 	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
@@ -201,7 +233,6 @@ UserInputService.InputEnded:Connect(function(input)
 	end
 end)
 
--- Хелпер для создания кнопки
 local function makeButton(text, y, color, size, pos)
 	local btn = Instance.new("TextButton")
 	btn.Size = size or UDim2.new(1, -16, 0, 32)
@@ -271,6 +302,15 @@ local reqList = Instance.new("UIListLayout")
 reqList.Padding = UDim.new(0, 2)
 reqList.Parent = reqFrame
 
+-- ====================== ОЧИСТКА ПАНЕЛИ ======================
+local function clearReqFrame()
+	for _, child in ipairs(reqFrame:GetChildren()) do
+		if child:IsA("TextLabel") then
+			child:Destroy()
+		end
+	end
+end
+
 -- ====================== РАЗМЕР ПАНЕЛИ ======================
 local function updatePanelSize()
 	if reqFrame.Visible then
@@ -282,27 +322,116 @@ end
 
 reqFrame:GetPropertyChangedSignal("Visible"):Connect(updatePanelSize)
 
+-- ====================== ЗАКРЫТИЕ ПАНЕЛЕЙ ======================
+local function closeInfoPanel()
+	if not showingInfo then return end
+	showingInfo = false
+	clearReqFrame()
+	reqFrame.Visible = false
+	btnInfo.BackgroundColor3 = Color3.fromRGB(90, 90, 160)
+end
+
+local function closeHelpPanel()
+	if not showingHelp then return end
+	showingHelp = false
+	clearReqFrame()
+	reqFrame.Visible = false
+	helpBtn.BackgroundColor3 = HELP_BTN_COLOR
+end
+
+-- ====================== ПОМОЩЬ (!) ======================
+local function showHelp()
+	if showingHelp then
+		closeHelpPanel()
+		statusLabel.Text = "Помощь закрыта"
+		return
+	end
+
+	closeInfoPanel()
+	if isBuildingMode then
+		isBuildingMode = false
+		btnBuild.Text = "Режим сборки"
+		btnBuild.BackgroundColor3 = Color3.fromRGB(155, 95, 35)
+	end
+
+	clearReqFrame()
+	showingHelp = true
+	helpBtn.BackgroundColor3 = HELP_BTN_ACTIVE
+
+	reqFrame.Visible = true
+
+	local titleLab = Instance.new("TextLabel")
+	titleLab.Size = UDim2.new(1, -6, 0, 16)
+	titleLab.BackgroundTransparency = 1
+	titleLab.Text = "=== СПРАВКА ==="
+	titleLab.TextColor3 = Color3.fromRGB(100, 200, 255)
+	titleLab.Font = Enum.Font.GothamBold
+	titleLab.TextSize = 11
+	titleLab.TextXAlignment = Enum.TextXAlignment.Left
+	titleLab.Parent = reqFrame
+
+	local faq = {
+		{ "Tr (Transparency)", "Прозрачность: 0 - плотный, 1 - невидимый" },
+		{ "RGB", "Цвет парта в формате Красный, Зелёный, Синий (0-255)" },
+		{ "Material", "Материал поверхности (Plastic, Wood, Neon и т.д.)" },
+		{ "Shape", "Форма обычного Part: Ball, Block, Cylinder, Wedge, CornerWedge" },
+		{ "Name", "Имя парта в Explorer" },
+		{ "xN", "Сколько таких партов в шаблоне" },
+		{ "Режим выделения", "Тапай по партам - они подсветятся зелёным" },
+		{ "Режим коробки", "Создаёт коробку. Тащи её по экрану и меняй размер кнопками +/-" },
+		{ "Готово", "Сохраняет парты внутри коробки (или выделенные) в шаблон" },
+		{ "?", "Показывает инфо о сохранённом шаблоне (список шагов)" },
+		{ "Режим сборки", "Пошаговая проверка: собери нужные парты рядом с собой" },
+		{ "✓", "Финальная сборка модели на позиции перед тобой (клавиша B)" },
+	}
+
+	for i, item in ipairs(faq) do
+		local l1 = Instance.new("TextLabel")
+		l1.Size = UDim2.new(1, -6, 0, 14)
+		l1.BackgroundTransparency = 1
+		l1.Text = i .. ". " .. item[1]
+		l1.TextColor3 = Color3.fromRGB(220, 220, 100)
+		l1.Font = Enum.Font.GothamBold
+		l1.TextSize = 11
+		l1.TextXAlignment = Enum.TextXAlignment.Left
+		l1.Parent = reqFrame
+
+		local l2 = Instance.new("TextLabel")
+		l2.Size = UDim2.new(1, -6, 0, 24)
+		l2.BackgroundTransparency = 1
+		l2.Text = "   " .. item[2]
+		l2.TextColor3 = Color3.fromRGB(190, 190, 190)
+		l2.Font = Enum.Font.Gotham
+		l2.TextSize = 10
+		l2.TextXAlignment = Enum.TextXAlignment.Left
+		l2.TextWrapped = true
+		l2.Parent = reqFrame
+	end
+
+	task.wait()
+	reqFrame.CanvasSize = UDim2.new(0, 0, 0, reqList.AbsoluteContentSize.Y + 10)
+
+	statusLabel.Text = "Справка открыта"
+end
+
+helpBtn.MouseButton1Click:Connect(showHelp)
+
 -- ====================== ПОКАЗ ИНФОРМАЦИИ ======================
 local function showTemplateInfo()
-	-- Если инфо уже открыто — закрываем его
 	if showingInfo then
-		showingInfo = false
-		for _, child in ipairs(reqFrame:GetChildren()) do
-			if child:IsA("TextLabel") then
-				child:Destroy()
-			end
-		end
-		reqFrame.Visible = false
-		btnInfo.BackgroundColor3 = Color3.fromRGB(90, 90, 160)
+		closeInfoPanel()
 		statusLabel.Text = "Инфо закрыто"
 		return
 	end
 
-	for _, child in ipairs(reqFrame:GetChildren()) do
-		if child:IsA("TextLabel") then
-			child:Destroy()
-		end
+	closeHelpPanel()
+	if isBuildingMode then
+		isBuildingMode = false
+		btnBuild.Text = "Режим сборки"
+		btnBuild.BackgroundColor3 = Color3.fromRGB(155, 95, 35)
 	end
+
+	clearReqFrame()
 
 	if not currentTemplate or not currentTemplate.Parts then
 		statusLabel.Text = "Нет сохранённого шаблона"
@@ -310,9 +439,6 @@ local function showTemplateInfo()
 	end
 
 	showingInfo = true
-	isBuildingMode = false
-	btnBuild.Text = "Режим сборки"
-	btnBuild.BackgroundColor3 = Color3.fromRGB(155, 95, 35)
 	btnInfo.BackgroundColor3 = Color3.fromRGB(140, 140, 220)
 
 	reqFrame.Visible = true
@@ -333,7 +459,7 @@ local function showTemplateInfo()
 		local line1 = Instance.new("TextLabel")
 		line1.Size = UDim2.new(1, -6, 0, 14)
 		line1.BackgroundTransparency = 1
-		line1.Text = string.format("%d. %s  x%d", i, step.Name, step.Count)
+		line1.Text = string.format("%d. %s  x%d", i, getDisplayName(step.Name, step.ShapeKey), step.Count)
 		line1.TextColor3 = Color3.fromRGB(220, 220, 100)
 		line1.Font = Enum.Font.GothamBold
 		line1.TextSize = 11
@@ -410,7 +536,6 @@ local function createBox()
 end
 
 local function finishBoxToTemplate()
-	-- Если коробки нет, но есть выделение — сохраняем выделение
 	if not selectionBoxPart then
 		if getSelectedCount() == 0 then
 			statusLabel.Text = "Коробка не создана"
@@ -445,6 +570,7 @@ local function finishBoxToTemplate()
 			end
 			table.insert(partsList, {
 				Name = part.Name,
+				ShapeKey = getShapeKey(part),
 				Size = part.Size,
 				Color = part.Color,
 				Material = part.Material,
@@ -503,6 +629,7 @@ local function finishBoxToTemplate()
 
 		table.insert(partsList, {
 			Name = part.Name,
+			ShapeKey = getShapeKey(part),
 			Size = part.Size,
 			Color = part.Color,
 			Material = part.Material,
@@ -526,7 +653,7 @@ end
 
 -- ====================== СБОРКА (ПОШАГОВАЯ) ======================
 local function updateRequirements()
-	if showingInfo then return end
+	if showingInfo or showingHelp then return end
 
 	for _, child in ipairs(reqFrame:GetChildren()) do
 		if child:IsA("TextLabel") then
@@ -574,12 +701,15 @@ local function updateRequirements()
 	local foundCount = 0
 	local foundParts = {}
 
+	local stepShape = step.ShapeKey or ""
+
 	for _, part in ipairs(workspace:GetPartBoundsInRadius(root.Position, SCAN_RADIUS)) do
 		if not isIgnoredPart(part) then
 			if part.Name == step.Name
 				and colorsEqual(part.Color, step.Color)
 				and part.Material == step.Material
-				and math.abs(part.Transparency - step.Transparency) < 0.01 then
+				and math.abs(part.Transparency - step.Transparency) < 0.01
+				and getShapeKey(part) == stepShape then
 				foundCount = foundCount + 1
 				table.insert(foundParts, part)
 			end
@@ -589,7 +719,7 @@ local function updateRequirements()
 	local label = Instance.new("TextLabel")
 	label.Size = UDim2.new(1, -6, 0, 14)
 	label.BackgroundTransparency = 1
-	label.Text = string.format("Шаг %d/%d: %s", currentStepIndex, #steps, step.Name)
+	label.Text = string.format("Шаг %d/%d: %s", currentStepIndex, #steps, getDisplayName(step.Name, step.ShapeKey))
 	label.TextColor3 = Color3.fromRGB(200, 200, 255)
 	label.Font = Enum.Font.GothamBold
 	label.TextSize = 11
@@ -650,11 +780,7 @@ local function assemble()
 	local available = {}
 	for _, part in ipairs(workspace:GetPartBoundsInRadius(root.Position, SCAN_RADIUS)) do
 		if not isIgnoredPart(part) then
-			local key = string.format("%s_%.3f_%.3f_%.3f_%s_%.3f",
-				part.Name,
-				part.Color.R, part.Color.G, part.Color.B,
-				tostring(part.Material),
-				part.Transparency)
+			local key = makeKey(part.Name, part.Color, part.Material, part.Transparency, getShapeKey(part))
 			if not available[key] then
 				available[key] = {}
 			end
@@ -663,11 +789,7 @@ local function assemble()
 	end
 
 	for _, data in ipairs(currentTemplate.Parts) do
-		local key = string.format("%s_%.3f_%.3f_%.3f_%s_%.3f",
-			data.Name,
-			data.Color.R, data.Color.G, data.Color.B,
-			tostring(data.Material),
-			data.Transparency)
+		local key = makeKey(data.Name, data.Color, data.Material, data.Transparency, data.ShapeKey)
 		local list = available[key]
 		if list and #list > 0 then
 			local part = table.remove(list, 1)
@@ -677,6 +799,16 @@ local function assemble()
 			part.Color = data.Color
 			part.Material = data.Material
 			part.Transparency = data.Transparency
+
+			if data.ShapeKey and data.ShapeKey ~= "" and part:IsA("Part") then
+				if data.ShapeKey == "Ball" then part.Shape = Enum.PartType.Ball
+				elseif data.ShapeKey == "Block" then part.Shape = Enum.PartType.Block
+				elseif data.ShapeKey == "Cylinder" then part.Shape = Enum.PartType.Cylinder
+				elseif data.ShapeKey == "Wedge" then part.Shape = Enum.PartType.Wedge
+				elseif data.ShapeKey == "CornerWedge" then part.Shape = Enum.PartType.CornerWedge
+				end
+			end
+
 			part.CFrame = buildCF * data.RelativeCFrame
 		end
 	end
@@ -684,11 +816,13 @@ local function assemble()
 	statusLabel.Text = "Модель собрана точно!"
 	isBuildingMode = false
 	showingInfo = false
+	showingHelp = false
 	btnBuild.Text = "Режим сборки"
 	btnBuild.BackgroundColor3 = Color3.fromRGB(155, 95, 35)
 	reqFrame.Visible = false
 	btnAssemble.BackgroundColor3 = Color3.fromRGB(200, 80, 30)
 	btnInfo.BackgroundColor3 = Color3.fromRGB(90, 90, 160)
+	helpBtn.BackgroundColor3 = HELP_BTN_COLOR
 	currentStepIndex = 1
 end
 
@@ -782,16 +916,8 @@ btnBuild.MouseButton1Click:Connect(function()
 		return
 	end
 
-	-- Если открыта инфа — закрываем её
-	if showingInfo then
-		showingInfo = false
-		for _, child in ipairs(reqFrame:GetChildren()) do
-			if child:IsA("TextLabel") then
-				child:Destroy()
-			end
-		end
-		btnInfo.BackgroundColor3 = Color3.fromRGB(90, 90, 160)
-	end
+	closeInfoPanel()
+	closeHelpPanel()
 
 	isBuildingMode = not isBuildingMode
 	currentStepIndex = 1
@@ -806,7 +932,7 @@ end)
 btnAssemble.MouseButton1Click:Connect(assemble)
 
 RunService.Heartbeat:Connect(function()
-	if isBuildingMode and currentTemplate and not showingInfo then
+	if isBuildingMode and currentTemplate and not showingInfo and not showingHelp then
 		updateRequirements()
 	end
 end)
