@@ -1,0 +1,814 @@
+-- LocalScript (StarterPlayerScripts)
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+
+local player = Players.LocalPlayer
+local mouse = player:GetMouse()
+local camera = workspace.CurrentCamera
+
+-- ====================== НАСТРОЙКИ ======================
+local SCAN_RADIUS = 35
+local BUILD_OFFSET = Vector3.new(8, 0, 0)
+local HIGHLIGHT_COLOR = Color3.fromRGB(0, 255, 120)
+local BOX_COLOR = Color3.fromRGB(0, 170, 255)
+local BOX_DEFAULT_SIZE = Vector3.new(12, 12, 12)
+local BOX_DEFAULT_DISTANCE = 18
+
+local BASE_HEIGHT = 220       -- высота окна когда всё свёрнуто
+local EXPANDED_HEIGHT = 320   -- высота окна когда показана инфо/требования
+-- =======================================================
+
+local selectedParts = {}
+local currentTemplate = nil
+local isSelecting = false
+local isBuildingMode = false
+local isBoxMode = false
+local isDraggingBox = false
+local isDraggingUI = false
+local currentStepIndex = 1
+local showingInfo = false
+
+local selectionBoxPart = nil
+local frameStartPos = nil
+local uiDragStart = nil
+
+-- ====================== ВСПОМОГАТЕЛЬНЫЕ ======================
+local function isIgnoredPart(part)
+	if not part or not part:IsA("BasePart") then
+		return true
+	end
+
+	local name = part.Name
+	if name == "Area" or name == "Grid" or name == "RotatePart"
+		or name == "Baseplate" or name == "Report" then
+		return true
+	end
+
+	local char = player.Character
+	if char and part:IsDescendantOf(char) then
+		return true
+	end
+
+	local model = part:FindFirstAncestorOfClass("Model")
+	if model and model:FindFirstChildOfClass("Humanoid") then
+		return true
+	end
+
+	return false
+end
+
+local function getSelectedCount()
+	local count = 0
+	for _ in pairs(selectedParts) do
+		count = count + 1
+	end
+	return count
+end
+
+local function clearSelection()
+	for part in pairs(selectedParts) do
+		if part and part:IsA("BasePart") then
+			local hl = part:FindFirstChild("BlueprintHighlight")
+			if hl then
+				hl:Destroy()
+			end
+		end
+	end
+	selectedParts = {}
+	statusLabel.Text = "Выделение очищено"
+end
+
+local function addToSelection(part)
+	if not part:IsA("BasePart") or selectedParts[part] then
+		return
+	end
+	if part == selectionBoxPart or isIgnoredPart(part) then
+		return
+	end
+	selectedParts[part] = true
+
+	local hl = Instance.new("Highlight")
+	hl.Name = "BlueprintHighlight"
+	hl.FillColor = HIGHLIGHT_COLOR
+	hl.OutlineColor = HIGHLIGHT_COLOR
+	hl.FillTransparency = 0.65
+	hl.Parent = part
+end
+
+local function colorsEqual(c1, c2)
+	return c1.R == c2.R and c1.G == c2.G and c1.B == c2.B
+end
+
+local function buildSteps(partsList)
+	local steps = {}
+	local lookup = {}
+
+	for _, data in ipairs(partsList) do
+		local key = string.format("%s_%.3f_%.3f_%.3f_%s_%.3f",
+			data.Name,
+			data.Color.R, data.Color.G, data.Color.B,
+			tostring(data.Material),
+			data.Transparency)
+
+		if not lookup[key] then
+			lookup[key] = {
+				Name = data.Name,
+				Color = data.Color,
+				Material = data.Material,
+				Transparency = data.Transparency,
+				Count = 0
+			}
+			table.insert(steps, lookup[key])
+		end
+		lookup[key].Count = lookup[key].Count + 1
+	end
+
+	return steps
+end
+
+-- ====================== UI ======================
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "BlueprintBuilderUI"
+screenGui.ResetOnSpawn = false
+screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+screenGui.Parent = player:WaitForChild("PlayerGui")
+
+local mainFrame = Instance.new("Frame")
+mainFrame.Name = "Main"
+mainFrame.Size = UDim2.new(0, 240, 0, BASE_HEIGHT)
+mainFrame.Position = UDim2.new(0, 10, 0, 30)
+mainFrame.BackgroundColor3 = Color3.fromRGB(22, 22, 28)
+mainFrame.BorderSizePixel = 0
+mainFrame.Parent = screenGui
+
+local corner = Instance.new("UICorner")
+corner.CornerRadius = UDim.new(0, 12)
+corner.Parent = mainFrame
+
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(1, -40, 0, 34)
+title.Position = UDim2.new(0, 0, 0, 0)
+title.BackgroundTransparency = 1
+title.Text = "  Blueprint Builder"
+title.TextColor3 = Color3.new(1, 1, 1)
+title.Font = Enum.Font.GothamBold
+title.TextSize = 15
+title.TextXAlignment = Enum.TextXAlignment.Left
+title.Parent = mainFrame
+
+local closeBtn = Instance.new("TextButton")
+closeBtn.Size = UDim2.new(0, 32, 0, 32)
+closeBtn.Position = UDim2.new(1, -36, 0, 1)
+closeBtn.BackgroundColor3 = Color3.fromRGB(180, 45, 45)
+closeBtn.Text = "X"
+closeBtn.TextColor3 = Color3.new(1, 1, 1)
+closeBtn.Font = Enum.Font.GothamBold
+closeBtn.TextSize = 15
+closeBtn.Parent = mainFrame
+
+local closeCorner = Instance.new("UICorner")
+closeCorner.CornerRadius = UDim.new(0, 8)
+closeCorner.Parent = closeBtn
+
+closeBtn.MouseButton1Click:Connect(function()
+	screenGui:Destroy()
+end)
+
+title.InputBegan:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+		isDraggingUI = true
+		uiDragStart = input.Position
+		frameStartPos = mainFrame.Position
+	end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+	if isDraggingUI and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+		local delta = input.Position - uiDragStart
+		mainFrame.Position = UDim2.new(
+			frameStartPos.X.Scale,
+			frameStartPos.X.Offset + delta.X,
+			frameStartPos.Y.Scale,
+			frameStartPos.Y.Offset + delta.Y
+		)
+	end
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+		isDraggingUI = false
+	end
+end)
+
+-- Хелпер для создания кнопки
+local function makeButton(text, y, color, size, pos)
+	local btn = Instance.new("TextButton")
+	btn.Size = size or UDim2.new(1, -16, 0, 32)
+	btn.Position = pos or UDim2.new(0, 8, 0, y)
+	btn.BackgroundColor3 = color
+	btn.Text = text
+	btn.TextColor3 = Color3.new(1, 1, 1)
+	btn.Font = Enum.Font.GothamBold
+	btn.TextSize = 13
+	btn.AutoButtonColor = true
+	btn.Parent = mainFrame
+
+	local c = Instance.new("UICorner")
+	c.CornerRadius = UDim.new(0, 8)
+	c.Parent = btn
+	return btn
+end
+
+-- ===== Ряд 1: Режим выделения =====
+local btnSelect = makeButton("Режим выделения", 38, Color3.fromRGB(55, 115, 200))
+
+-- ===== Ряд 2: |-  Режим коробки  +| =====
+local btnScaleDown = makeButton("-", 74, Color3.fromRGB(50, 100, 140),
+	UDim2.new(0, 36, 0, 32), UDim2.new(0, 8, 0, 74))
+local btnBox       = makeButton("Режим коробки", 74, Color3.fromRGB(35, 135, 175),
+	UDim2.new(1, -96, 0, 32), UDim2.new(0, 48, 0, 74))
+local btnScaleUp   = makeButton("+", 74, Color3.fromRGB(50, 100, 140),
+	UDim2.new(0, 36, 0, 32), UDim2.new(1, -44, 0, 74))
+
+-- ===== Ряд 3: Готово (в шаблон) =====
+local btnDoneBox = makeButton("Готово (в шаблон)", 110, Color3.fromRGB(40, 160, 90))
+
+-- ===== Ряд 4: |?  Режим сборки  ✓| =====
+local btnInfo     = makeButton("?", 146, Color3.fromRGB(90, 90, 160),
+	UDim2.new(0, 36, 0, 32), UDim2.new(0, 8, 0, 146))
+local btnBuild    = makeButton("Режим сборки", 146, Color3.fromRGB(155, 95, 35),
+	UDim2.new(1, -96, 0, 32), UDim2.new(0, 48, 0, 146))
+local btnAssemble = makeButton("✓", 146, Color3.fromRGB(200, 80, 30),
+	UDim2.new(0, 36, 0, 32), UDim2.new(1, -44, 0, 146))
+
+local statusLabel = Instance.new("TextLabel")
+statusLabel.Size = UDim2.new(1, -16, 0, 22)
+statusLabel.Position = UDim2.new(0, 8, 0, 186)
+statusLabel.BackgroundTransparency = 1
+statusLabel.Text = "Статус: готов"
+statusLabel.TextColor3 = Color3.fromRGB(190, 190, 190)
+statusLabel.Font = Enum.Font.Gotham
+statusLabel.TextSize = 11
+statusLabel.TextXAlignment = Enum.TextXAlignment.Left
+statusLabel.Parent = mainFrame
+
+local reqFrame = Instance.new("ScrollingFrame")
+reqFrame.Size = UDim2.new(1, -16, 0, 96)
+reqFrame.Position = UDim2.new(0, 8, 0, 216)
+reqFrame.BackgroundColor3 = Color3.fromRGB(32, 32, 38)
+reqFrame.BorderSizePixel = 0
+reqFrame.ScrollBarThickness = 3
+reqFrame.Visible = false
+reqFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
+reqFrame.Parent = mainFrame
+
+local reqCorner = Instance.new("UICorner")
+reqCorner.CornerRadius = UDim.new(0, 6)
+reqCorner.Parent = reqFrame
+
+local reqList = Instance.new("UIListLayout")
+reqList.Padding = UDim.new(0, 2)
+reqList.Parent = reqFrame
+
+-- ====================== РАЗМЕР ПАНЕЛИ ======================
+local function updatePanelSize()
+	if reqFrame.Visible then
+		mainFrame.Size = UDim2.new(0, 240, 0, EXPANDED_HEIGHT)
+	else
+		mainFrame.Size = UDim2.new(0, 240, 0, BASE_HEIGHT)
+	end
+end
+
+reqFrame:GetPropertyChangedSignal("Visible"):Connect(updatePanelSize)
+
+-- ====================== ПОКАЗ ИНФОРМАЦИИ ======================
+local function showTemplateInfo()
+	-- Если инфо уже открыто — закрываем его
+	if showingInfo then
+		showingInfo = false
+		for _, child in ipairs(reqFrame:GetChildren()) do
+			if child:IsA("TextLabel") then
+				child:Destroy()
+			end
+		end
+		reqFrame.Visible = false
+		btnInfo.BackgroundColor3 = Color3.fromRGB(90, 90, 160)
+		statusLabel.Text = "Инфо закрыто"
+		return
+	end
+
+	for _, child in ipairs(reqFrame:GetChildren()) do
+		if child:IsA("TextLabel") then
+			child:Destroy()
+		end
+	end
+
+	if not currentTemplate or not currentTemplate.Parts then
+		statusLabel.Text = "Нет сохранённого шаблона"
+		return
+	end
+
+	showingInfo = true
+	isBuildingMode = false
+	btnBuild.Text = "Режим сборки"
+	btnBuild.BackgroundColor3 = Color3.fromRGB(155, 95, 35)
+	btnInfo.BackgroundColor3 = Color3.fromRGB(140, 140, 220)
+
+	reqFrame.Visible = true
+
+	local steps = currentTemplate.Steps or buildSteps(currentTemplate.Parts)
+
+	local titleLab = Instance.new("TextLabel")
+	titleLab.Size = UDim2.new(1, -6, 0, 16)
+	titleLab.BackgroundTransparency = 1
+	titleLab.Text = "=== ИНФО ШАБЛОНА (" .. #currentTemplate.Parts .. " частей) ==="
+	titleLab.TextColor3 = Color3.fromRGB(100, 200, 255)
+	titleLab.Font = Enum.Font.GothamBold
+	titleLab.TextSize = 11
+	titleLab.TextXAlignment = Enum.TextXAlignment.Left
+	titleLab.Parent = reqFrame
+
+	for i, step in ipairs(steps) do
+		local line1 = Instance.new("TextLabel")
+		line1.Size = UDim2.new(1, -6, 0, 14)
+		line1.BackgroundTransparency = 1
+		line1.Text = string.format("%d. %s  x%d", i, step.Name, step.Count)
+		line1.TextColor3 = Color3.fromRGB(220, 220, 100)
+		line1.Font = Enum.Font.GothamBold
+		line1.TextSize = 11
+		line1.TextXAlignment = Enum.TextXAlignment.Left
+		line1.Parent = reqFrame
+
+		local line2 = Instance.new("TextLabel")
+		line2.Size = UDim2.new(1, -6, 0, 13)
+		line2.BackgroundTransparency = 1
+		line2.Text = string.format("   %s | RGB(%.0f,%.0f,%.0f) | Tr: %.2f",
+			tostring(step.Material):gsub("Enum.Material.", ""),
+			step.Color.R * 255, step.Color.G * 255, step.Color.B * 255,
+			step.Transparency)
+		line2.TextColor3 = Color3.fromRGB(180, 180, 180)
+		line2.Font = Enum.Font.Gotham
+		line2.TextSize = 10
+		line2.TextXAlignment = Enum.TextXAlignment.Left
+		line2.Parent = reqFrame
+	end
+
+	task.wait()
+	reqFrame.CanvasSize = UDim2.new(0, 0, 0, reqList.AbsoluteContentSize.Y + 10)
+
+	statusLabel.Text = "Показана информация о шаблоне"
+end
+
+-- ====================== КОРОБКА ======================
+local function destroyBox()
+	if selectionBoxPart then
+		selectionBoxPart:Destroy()
+		selectionBoxPart = nil
+	end
+	isBoxMode = false
+	isDraggingBox = false
+	btnBox.BackgroundColor3 = Color3.fromRGB(35, 135, 175)
+	btnBox.Text = "Режим коробки"
+end
+
+local function createBox()
+	destroyBox()
+
+	local char = player.Character
+	local root = char and char:FindFirstChild("HumanoidRootPart")
+	local spawnCF
+
+	if root then
+		spawnCF = root.CFrame * CFrame.new(0, 4, -BOX_DEFAULT_DISTANCE)
+	else
+		spawnCF = CFrame.new(0, 10, 0)
+	end
+
+	selectionBoxPart = Instance.new("Part")
+	selectionBoxPart.Name = "SelectionBoxVisual"
+	selectionBoxPart.Anchored = true
+	selectionBoxPart.CanCollide = false
+	selectionBoxPart.CastShadow = false
+	selectionBoxPart.Material = Enum.Material.ForceField
+	selectionBoxPart.Color = BOX_COLOR
+	selectionBoxPart.Transparency = 0.55
+	selectionBoxPart.Size = BOX_DEFAULT_SIZE
+	selectionBoxPart.CFrame = spawnCF
+	selectionBoxPart.Parent = workspace
+
+	local sb = Instance.new("SelectionBox")
+	sb.Adornee = selectionBoxPart
+	sb.Color3 = BOX_COLOR
+	sb.LineThickness = 0.06
+	sb.Parent = selectionBoxPart
+
+	isBoxMode = true
+	btnBox.BackgroundColor3 = Color3.fromRGB(30, 180, 100)
+	btnBox.Text = "Коробка ВКЛ"
+	statusLabel.Text = "Тащи коробку • +/- • Готово"
+end
+
+local function finishBoxToTemplate()
+	-- Если коробки нет, но есть выделение — сохраняем выделение
+	if not selectionBoxPart then
+		if getSelectedCount() == 0 then
+			statusLabel.Text = "Коробка не создана"
+			return
+		end
+
+		local partsList = {}
+		local center = Vector3.zero
+		local count = 0
+		local valid = {}
+
+		for part in pairs(selectedParts) do
+			if part and part:IsA("BasePart") and not isIgnoredPart(part) then
+				table.insert(valid, part)
+				center = center + part.Position
+				count = count + 1
+			end
+		end
+
+		if count == 0 then
+			statusLabel.Text = "Нечего сохранять!"
+			return
+		end
+
+		center = center / count
+
+		for _, part in ipairs(valid) do
+			local relativeCFrame = CFrame.new(center):ToObjectSpace(part.CFrame)
+			local childrenData = {}
+			for _, child in ipairs(part:GetChildren()) do
+				table.insert(childrenData, { ClassName = child.ClassName, Name = child.Name })
+			end
+			table.insert(partsList, {
+				Name = part.Name,
+				Size = part.Size,
+				Color = part.Color,
+				Material = part.Material,
+				Transparency = part.Transparency,
+				RelativeCFrame = relativeCFrame,
+				Children = childrenData
+			})
+		end
+
+		currentTemplate = {
+			Parts = partsList,
+			Center = center,
+			Steps = buildSteps(partsList)
+		}
+		currentStepIndex = 1
+		showingInfo = false
+		statusLabel.Text = "Шаблон сохранён! Партов: " .. #partsList
+		clearSelection()
+		return
+	end
+
+	local size = selectionBoxPart.Size
+	local cf = selectionBoxPart.CFrame
+	local partsInBox = workspace:GetPartBoundsInBox(cf, size)
+
+	local validParts = {}
+	local center = Vector3.zero
+	local count = 0
+
+	for _, p in ipairs(partsInBox) do
+		if p:IsA("BasePart") and not (p == selectionBoxPart) and not isIgnoredPart(p) then
+			table.insert(validParts, p)
+			center = center + p.Position
+			count = count + 1
+		end
+	end
+
+	if count == 0 then
+		statusLabel.Text = "В коробке ничего нет!"
+		return
+	end
+
+	center = center / count
+
+	local partsList = {}
+	for _, part in ipairs(validParts) do
+		local relativeCFrame = CFrame.new(center):ToObjectSpace(part.CFrame)
+
+		local childrenData = {}
+		for _, child in ipairs(part:GetChildren()) do
+			table.insert(childrenData, {
+				ClassName = child.ClassName,
+				Name = child.Name
+			})
+		end
+
+		table.insert(partsList, {
+			Name = part.Name,
+			Size = part.Size,
+			Color = part.Color,
+			Material = part.Material,
+			Transparency = part.Transparency,
+			RelativeCFrame = relativeCFrame,
+			Children = childrenData
+		})
+	end
+
+	currentTemplate = {
+		Parts = partsList,
+		Center = center,
+		Steps = buildSteps(partsList)
+	}
+
+	currentStepIndex = 1
+	showingInfo = false
+	statusLabel.Text = "Шаблон сохранён! Партов: " .. #partsList
+	destroyBox()
+end
+
+-- ====================== СБОРКА (ПОШАГОВАЯ) ======================
+local function updateRequirements()
+	if showingInfo then return end
+
+	for _, child in ipairs(reqFrame:GetChildren()) do
+		if child:IsA("TextLabel") then
+			child:Destroy()
+		end
+	end
+
+	if not currentTemplate or not isBuildingMode then
+		reqFrame.Visible = false
+		return false, {}
+	end
+
+	local steps = currentTemplate.Steps
+	if not steps or #steps == 0 then
+		reqFrame.Visible = false
+		return false, {}
+	end
+
+	reqFrame.Visible = true
+
+	if currentStepIndex > #steps then
+		statusLabel.Text = "ВСЁ ГОТОВО! Жми ✓"
+		btnAssemble.BackgroundColor3 = Color3.fromRGB(40, 200, 80)
+
+		local doneLabel = Instance.new("TextLabel")
+		doneLabel.Size = UDim2.new(1, -6, 0, 18)
+		doneLabel.BackgroundTransparency = 1
+		doneLabel.Text = "Все шаги выполнены!"
+		doneLabel.TextColor3 = Color3.fromRGB(70, 255, 110)
+		doneLabel.Font = Enum.Font.Gotham
+		doneLabel.TextSize = 12
+		doneLabel.TextXAlignment = Enum.TextXAlignment.Left
+		doneLabel.Parent = reqFrame
+
+		return true, {}
+	end
+
+	local step = steps[currentStepIndex]
+	local character = player.Character
+	if not character or not character:FindFirstChild("HumanoidRootPart") then
+		return false, {}
+	end
+
+	local root = character.HumanoidRootPart
+	local foundCount = 0
+	local foundParts = {}
+
+	for _, part in ipairs(workspace:GetPartBoundsInRadius(root.Position, SCAN_RADIUS)) do
+		if not isIgnoredPart(part) then
+			if part.Name == step.Name
+				and colorsEqual(part.Color, step.Color)
+				and part.Material == step.Material
+				and math.abs(part.Transparency - step.Transparency) < 0.01 then
+				foundCount = foundCount + 1
+				table.insert(foundParts, part)
+			end
+		end
+	end
+
+	local label = Instance.new("TextLabel")
+	label.Size = UDim2.new(1, -6, 0, 14)
+	label.BackgroundTransparency = 1
+	label.Text = string.format("Шаг %d/%d: %s", currentStepIndex, #steps, step.Name)
+	label.TextColor3 = Color3.fromRGB(200, 200, 255)
+	label.Font = Enum.Font.GothamBold
+	label.TextSize = 11
+	label.TextXAlignment = Enum.TextXAlignment.Left
+	label.Parent = reqFrame
+
+	local info = Instance.new("TextLabel")
+	info.Size = UDim2.new(1, -6, 0, 13)
+	info.BackgroundTransparency = 1
+	info.Text = string.format("%s | RGB(%.0f,%.0f,%.0f)",
+		tostring(step.Material):gsub("Enum.Material.", ""),
+		step.Color.R * 255, step.Color.G * 255, step.Color.B * 255)
+	info.TextColor3 = Color3.fromRGB(220, 220, 220)
+	info.Font = Enum.Font.Gotham
+	info.TextSize = 10
+	info.TextXAlignment = Enum.TextXAlignment.Left
+	info.Parent = reqFrame
+
+	local transpInfo = Instance.new("TextLabel")
+	transpInfo.Size = UDim2.new(1, -6, 0, 13)
+	transpInfo.BackgroundTransparency = 1
+	transpInfo.Text = string.format("Прозрачность: %.2f   |   %d / %d", step.Transparency, foundCount, step.Count)
+	transpInfo.TextColor3 = foundCount >= step.Count and Color3.fromRGB(70, 255, 110) or Color3.fromRGB(255, 110, 110)
+	transpInfo.Font = Enum.Font.Gotham
+	transpInfo.TextSize = 10
+	transpInfo.TextXAlignment = Enum.TextXAlignment.Left
+	transpInfo.Parent = reqFrame
+
+	if foundCount >= step.Count then
+		currentStepIndex = currentStepIndex + 1
+		statusLabel.Text = "Шаг выполнен! Следующий..."
+		btnAssemble.BackgroundColor3 = Color3.fromRGB(200, 80, 30)
+		return false, foundParts
+	else
+		statusLabel.Text = "Собери нужные части рядом"
+		btnAssemble.BackgroundColor3 = Color3.fromRGB(200, 80, 30)
+		return false, foundParts
+	end
+end
+
+local function assemble()
+	if not currentTemplate then return end
+
+	local steps = currentTemplate.Steps
+	if not steps or currentStepIndex <= #steps then
+		statusLabel.Text = "Сначала выполни все шаги!"
+		return
+	end
+
+	local character = player.Character
+	if not character or not character:FindFirstChild("HumanoidRootPart") then
+		return
+	end
+
+	local root = character.HumanoidRootPart
+	local buildCF = root.CFrame * CFrame.new(BUILD_OFFSET)
+
+	local available = {}
+	for _, part in ipairs(workspace:GetPartBoundsInRadius(root.Position, SCAN_RADIUS)) do
+		if not isIgnoredPart(part) then
+			local key = string.format("%s_%.3f_%.3f_%.3f_%s_%.3f",
+				part.Name,
+				part.Color.R, part.Color.G, part.Color.B,
+				tostring(part.Material),
+				part.Transparency)
+			if not available[key] then
+				available[key] = {}
+			end
+			table.insert(available[key], part)
+		end
+	end
+
+	for _, data in ipairs(currentTemplate.Parts) do
+		local key = string.format("%s_%.3f_%.3f_%.3f_%s_%.3f",
+			data.Name,
+			data.Color.R, data.Color.G, data.Color.B,
+			tostring(data.Material),
+			data.Transparency)
+		local list = available[key]
+		if list and #list > 0 then
+			local part = table.remove(list, 1)
+			part.Anchored = true
+			part.CanCollide = true
+			part.Size = data.Size
+			part.Color = data.Color
+			part.Material = data.Material
+			part.Transparency = data.Transparency
+			part.CFrame = buildCF * data.RelativeCFrame
+		end
+	end
+
+	statusLabel.Text = "Модель собрана точно!"
+	isBuildingMode = false
+	showingInfo = false
+	btnBuild.Text = "Режим сборки"
+	btnBuild.BackgroundColor3 = Color3.fromRGB(155, 95, 35)
+	reqFrame.Visible = false
+	btnAssemble.BackgroundColor3 = Color3.fromRGB(200, 80, 30)
+	btnInfo.BackgroundColor3 = Color3.fromRGB(90, 90, 160)
+	currentStepIndex = 1
+end
+
+-- ====================== ВВОД ======================
+mouse.Button1Down:Connect(function()
+	if not isSelecting or isBoxMode then
+		return
+	end
+	local target = mouse.Target
+	if target and target:IsA("BasePart") and not (target == selectionBoxPart) and not isIgnoredPart(target) then
+		addToSelection(target)
+		statusLabel.Text = "Выбрано: " .. getSelectedCount()
+	end
+end)
+
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+	if gameProcessed then
+		return
+	end
+
+	if isBoxMode and (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) then
+		if mouse.Target == selectionBoxPart then
+			isDraggingBox = true
+		end
+	end
+
+	if input.KeyCode == Enum.KeyCode.B and isBuildingMode then
+		assemble()
+	end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+	if isDraggingBox and selectionBoxPart and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+		local delta = input.Delta
+		local sens = 0.045
+		local move = (camera.CFrame.RightVector * delta.X - camera.CFrame.UpVector * delta.Y) * sens
+		selectionBoxPart.CFrame = selectionBoxPart.CFrame + move
+	end
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+		isDraggingBox = false
+	end
+end)
+
+-- ====================== КНОПКИ ======================
+btnSelect.MouseButton1Click:Connect(function()
+	isSelecting = not isSelecting
+	if isSelecting then
+		destroyBox()
+	end
+	btnSelect.BackgroundColor3 = isSelecting and Color3.fromRGB(35, 170, 85) or Color3.fromRGB(55, 115, 200)
+	statusLabel.Text = isSelecting and "Режим выделения ВКЛ" or "Режим выделения ВЫКЛ"
+end)
+
+btnBox.MouseButton1Click:Connect(function()
+	if isBoxMode then
+		destroyBox()
+		statusLabel.Text = "Коробка выключена"
+	else
+		isSelecting = false
+		btnSelect.BackgroundColor3 = Color3.fromRGB(55, 115, 200)
+		createBox()
+	end
+end)
+
+btnScaleUp.MouseButton1Click:Connect(function()
+	if selectionBoxPart then
+		selectionBoxPart.Size = selectionBoxPart.Size + Vector3.new(1.5, 1.5, 1.5)
+		statusLabel.Text = "Размер: " .. math.floor(selectionBoxPart.Size.X)
+	end
+end)
+
+btnScaleDown.MouseButton1Click:Connect(function()
+	if selectionBoxPart then
+		local newSize = selectionBoxPart.Size - Vector3.new(1.5, 1.5, 1.5)
+		if newSize.X >= 2 and newSize.Y >= 2 and newSize.Z >= 2 then
+			selectionBoxPart.Size = newSize
+			statusLabel.Text = "Размер: " .. math.floor(selectionBoxPart.Size.X)
+		end
+	end
+end)
+
+btnDoneBox.MouseButton1Click:Connect(finishBoxToTemplate)
+btnInfo.MouseButton1Click:Connect(showTemplateInfo)
+
+btnBuild.MouseButton1Click:Connect(function()
+	if not currentTemplate then
+		statusLabel.Text = "Сначала сохрани шаблон!"
+		return
+	end
+
+	-- Если открыта инфа — закрываем её
+	if showingInfo then
+		showingInfo = false
+		for _, child in ipairs(reqFrame:GetChildren()) do
+			if child:IsA("TextLabel") then
+				child:Destroy()
+			end
+		end
+		btnInfo.BackgroundColor3 = Color3.fromRGB(90, 90, 160)
+	end
+
+	isBuildingMode = not isBuildingMode
+	currentStepIndex = 1
+	btnBuild.BackgroundColor3 = isBuildingMode and Color3.fromRGB(200, 130, 40) or Color3.fromRGB(155, 95, 35)
+	btnBuild.Text = isBuildingMode and "Сборка ВКЛ" or "Режим сборки"
+	statusLabel.Text = isBuildingMode and "Режим сборки ВКЛ (по шагам)" or "Режим сборки ВЫКЛ"
+	if not isBuildingMode then
+		reqFrame.Visible = false
+	end
+end)
+
+btnAssemble.MouseButton1Click:Connect(assemble)
+
+RunService.Heartbeat:Connect(function()
+	if isBuildingMode and currentTemplate and not showingInfo then
+		updateRequirements()
+	end
+end)
+
+print("Blueprint Builder (Mobile) загружен")
